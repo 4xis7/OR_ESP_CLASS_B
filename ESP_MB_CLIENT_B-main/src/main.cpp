@@ -1,174 +1,364 @@
 #include <Arduino.h>
-#include "WiFi.h"
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Preferences.h>
 #include <esp_now.h>
+#include <LittleFS.h>
 
-//#define RXD2 16 //iTSD 
-//#define TXD2 17 //iTSD
-#define RXD1 25 //Readout
-#define TXD1 26 //Readout
+// =======================================================
+// CLIENT B NODE
+// =======================================================
 
-//0C:B8:15:C3:3C:64
-//0C:B8:15:C3:3C:64
+#define RXD1 25
+#define TXD1 26
 
-uint8_t broadcastAddress_server[] = {0xc4,0xd8,0xd5,0x95,0xa7,0xd8}; // Comp node
+// ================== LED ==================
+
+const int LED_wifi  = 18;
+const int LED_RS    = 17;
+const int LED_power = 19;
+
+// =====================================================
+// AP CONFIG
+// =====================================================
+
+const char* AP_SSID     = "ESP32_CONFIG";
+const char* AP_PASSWORD = "12345678";
+
+// =====================================================
+// GLOBAL
+// =====================================================
+
+Preferences prefs;
+WebServer   server(80);
+
+uint8_t peerMac[6];
+bool    peerReady = false;
+
+esp_now_peer_info_t peerInfo;
 
 TaskHandle_t Task1;
 TaskHandle_t Task2;
-//----------------------------------
+
 void Task1code(void * pvParameters);
 void Task2code(void * pvParameters);
-esp_now_peer_info_t peerInfo;
 
+// =====================================================
+// ตรวจสอบ MAC Format
+// =====================================================
 
-// ================== ✅ LED ==================
-const int LED_wifi = 18;
-const int LED_RS   = 17;
-const int LED_power = 19;
+bool isValidMac(String mac)
+{
+    if (mac.length() != 17)
+        return false;
 
+    for (int i = 0; i < 17; i++)
+    {
+        if (i == 2 || i == 5 || i == 8 ||
+            i == 11 || i == 14)
+        {
+            if (mac[i] != ':')
+                return false;
+        }
+        else
+        {
+            if (!isxdigit(mac[i]))
+                return false;
+        }
+    }
 
-void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
- 
-      if (status ==0){
+    return true;
+}
+
+// =====================================================
+// MAC STRING -> BYTE
+// =====================================================
+
+bool macStringToBytes(String macStr, uint8_t *mac)
+{
+    if (macStr.length() != 17)
+        return false;
+
+    int values[6];
+
+    if (sscanf(macStr.c_str(),
+               "%x:%x:%x:%x:%x:%x",
+               &values[0], &values[1],
+               &values[2], &values[3],
+               &values[4], &values[5]) != 6)
+    {
+        return false;
+    }
+
+    for (int i = 0; i < 6; ++i)
+        mac[i] = (uint8_t)values[i];
+
+    return true;
+}
+
+// =====================================================
+// LOAD PEER MAC จาก NVS
+// =====================================================
+
+void loadPeer()
+{
+    prefs.begin("config", true);
+    String macStr = prefs.getString("peer", "");
+    prefs.end();
+
+    if (macStr == "")
+    {
+        Serial.println("NO PEER");
+        return;
+    }
+
+    Serial.print("PEER = ");
+    Serial.println(macStr);
+
+    if (!macStringToBytes(macStr, peerMac))
+    {
+        Serial.println("INVALID MAC");
+        return;
+    }
+
+    memcpy(peerInfo.peer_addr, peerMac, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+
+    if (esp_now_add_peer(&peerInfo) == ESP_OK)
+    {
+        Serial.println("PEER ADDED");
+        peerReady = true;
+    }
+    else
+    {
+        Serial.println("ADD PEER FAIL");
+    }
+}
+
+// =====================================================
+// WEB HANDLERS
+// =====================================================
+
+void handleRoot()
+{
+    if (!LittleFS.exists("/index.html"))
+    {
+        server.send(404, "text/plain", "index.html not found");
+        return;
+    }
+
+    File f = LittleFS.open("/index.html", "r");
+    String html = "";
+    while (f.available())
+        html += (char)f.read();
+    f.close();
+
+    prefs.begin("config", true);
+    String savedPeer = prefs.getString("peer", "NOT SET");
+    prefs.end();
+
+    html.replace("%MY_MAC%",   WiFi.macAddress());
+    html.replace("%PEER_MAC%", savedPeer);
+
+    server.send(200, "text/html", html);
+}
+
+void handleSave()
+{
+    if (!server.hasArg("mac"))
+    {
+        server.send(400, "text/plain", "No MAC");
+        return;
+    }
+
+    String mac = server.arg("mac");
+    mac.trim();
+    mac.toUpperCase();
+
+    if (!isValidMac(mac))
+    {
+        server.send(200, "text/plain", "ERROR: Invalid MAC Format");
+        return;
+    }
+
+    prefs.begin("config", false);
+    prefs.putString("peer", mac);
+    prefs.end();
+
+    Serial.println("MAC SAVED: " + mac);
+
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+}
+
+void handleRestart()
+{
+    server.send(200, "text/plain", "RESTARTING");
+    delay(1000);
+    ESP.restart();
+}
+
+// =====================================================
+// ESP-NOW SEND CALLBACK
+// =====================================================
+
+void OnDataSent(const uint8_t *mac_addr,
+                esp_now_send_status_t status)
+{
+    if (status == ESP_NOW_SEND_SUCCESS)
+    {
         Serial.println("OK - OnDataSent()");
-        digitalWrite(LED_wifi, HIGH);   // 🔥 ติดค้าง
-      }
-      else{
+        digitalWrite(LED_wifi, HIGH);
+    }
+    else
+    {
         Serial.println("FAIL - OnDataSent()");
-        digitalWrite(LED_wifi, LOW);    // 🔥 ดับ
-      }
+        digitalWrite(LED_wifi, LOW);
+    }
 }
 
-void OnDataRecv(const uint8_t * mac, const uint8_t *incomingData, int len) {
-  
-  String dataIn;
-  
-  for (int i=0;i<len;i++) {
-    dataIn += (char)incomingData[i];
-  }
+// =====================================================
+// ESP-NOW RECEIVE CALLBACK
+// =====================================================
 
-  
-  Serial.print(dataIn);
-  Serial1.print(dataIn);
-  Serial.flush();
-  //delay(500);
+void OnDataRecv(const uint8_t *mac,
+                const uint8_t *incomingData,
+                int len)
+{
+    String dataIn = "";
 
-  
+    for (int i = 0; i < len; i++)
+        dataIn += (char)incomingData[i];
+
+    Serial.print(dataIn);
+    Serial1.print(dataIn);
+    Serial.flush();
 }
 
+// =====================================================
+// SETUP
+// =====================================================
 
-void setup(){
-  pinMode(2 , OUTPUT);
-  pinMode(4 , OUTPUT);
-  Serial.begin(9600);
-  Serial1.begin(9600, SERIAL_8N1, RXD1, TXD1);
-  //Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
-  pinMode(LED_power, OUTPUT);
-  digitalWrite(LED_power, HIGH);
-  // ✅ เพิ่ม LED
-  pinMode(LED_wifi, OUTPUT);
-  pinMode(LED_RS, OUTPUT);
+void setup()
+{
+    pinMode(2,         OUTPUT);
+    pinMode(4,         OUTPUT);
+    pinMode(LED_power, OUTPUT);
+    pinMode(LED_wifi,  OUTPUT);
+    pinMode(LED_RS,    OUTPUT);
 
-  digitalWrite(LED_wifi, LOW);
-  digitalWrite(LED_RS, LOW);
+    digitalWrite(LED_power, HIGH);
+    digitalWrite(LED_wifi,  LOW);
+    digitalWrite(LED_RS,    LOW);
 
-  WiFi.mode(WIFI_STA);
-  Serial.println(WiFi.macAddress());
+    Serial.begin(9600);
+    Serial1.begin(9600, SERIAL_8N1, RXD1, TXD1);
 
-  if (esp_now_init() != ESP_OK) {
-    Serial.println("Error initializing ESP-NOW");
-    return;
-  }
-  esp_now_register_send_cb(OnDataSent);
-  esp_now_register_recv_cb(OnDataRecv);
+    if (!LittleFS.begin(true))
+        Serial.println("LittleFS ERROR");
 
-  // Register peer
-  
-  memcpy(peerInfo.peer_addr, broadcastAddress_server, 6);
-  peerInfo.channel = 0;  
-  peerInfo.encrypt = false;
-  
-  // Add peer        
-  if (esp_now_add_peer(&peerInfo) != ESP_OK){
-    Serial.println("Failed to add peer");
-    return;
-  }
+    WiFi.mode(WIFI_STA);
+    Serial.println(WiFi.macAddress());
 
-  //create a task that will be executed in the Task1code() function, with priority 1 and executed on core 0
-  xTaskCreatePinnedToCore(
-                    Task1code,   /* Task function. */
-                    "Task1",     /* name of task. */
-                    10000,       /* Stack size of task */
-                    NULL,        /* parameter of the task */
-                    0,           /* priority of the task */
-                    &Task1,      /* Task handle to keep track of created task */
-                    0);          /* pin task to core 0 */                  
-  delay(500); 
+    WiFi.softAP(AP_SSID, AP_PASSWORD);
+    Serial.println("CONFIG MODE");
+    Serial.println(WiFi.softAPIP());
 
-  //create a task that will be executed in the Task2code() function, with priority 1 and executed on core 1
-  xTaskCreatePinnedToCore(
-                    Task2code,   /* Task function. */
-                    "Task2",     /* name of task. */
-                    10000,       /* Stack size of task */
-                    NULL,        /* parameter of the task */
-                    0,           /* priority of the task */
-                    &Task2,      /* Task handle to keep track of created task */
-                    1);          /* pin task to core 1 */
- 
+    server.on("/",        HTTP_GET,  handleRoot);
+    server.on("/save",    HTTP_POST, handleSave);
+    server.on("/restart", HTTP_POST, handleRestart);
+    server.begin();
+
+    if (esp_now_init() != ESP_OK)
+    {
+        Serial.println("ESP NOW ERROR");
+        return;
+    }
+
+    esp_now_register_send_cb(OnDataSent);
+    esp_now_register_recv_cb(OnDataRecv);
+
+    loadPeer();
+
+    xTaskCreatePinnedToCore(
+        Task1code, "Task1",
+        10000, NULL, 0, &Task1, 0);
+    delay(500);
+
+    xTaskCreatePinnedToCore(
+        Task2code, "Task2",
+        10000, NULL, 0, &Task2, 1);
     delay(500);
 }
 
-//Task2
-void Task1code( void * pvParameters ){
-  Serial.print("Task1 running on core ");
-  Serial.println(xPortGetCoreID());
+// =====================================================
+// TASK1 - Serial Relay -> ESP-NOW
+// =====================================================
 
-  for(;;){
-      //wail data from device (mobile device) then send data to server node (connected with computer)
-      if(Serial1.available() > 0){
+void Task1code(void * pvParameters)
+{
+    Serial.print("Task1 running on core ");
+    Serial.println(xPortGetCoreID());
 
-        digitalWrite(LED_RS, HIGH);   // 🔥 ติด
+    for (;;)
+    {
+        if (Serial1.available() > 0)
+        {
+            digitalWrite(LED_RS, HIGH);
 
-        String  msgWire = Serial1.readStringUntil('\r');
+            String msgWire = Serial1.readStringUntil('\r');
 
-        digitalWrite(LED_RS, LOW);    // 🔥 ดับ
-            //String  msgWire = Serial1.readString();
-            //This device needs to be limited the length of strings, so reducing character before send to server node 
-          // msg.trim();
-          // msg.replace(" ", "");
-          // msg.replace("\r", "");
+            digitalWrite(LED_RS, LOW);
 
-          // int denIndex = msg.indexOf("Density");
-          // String data_send = msg.substring(denIndex);
-          // esp_err_t result = esp_now_send( broadcastAddress_server, (uint8_t*)data_send.c_str(), data_send.length());
-          // Serial.print(data_send);
-           
-          String data_send = "MB2L:" + msgWire + "\r\n";
-          esp_err_t result = esp_now_send( broadcastAddress_server, (uint8_t*)data_send.c_str(), data_send.length());
+            String data_send = "MB2L:" + msgWire + "\r\n";
+
+            if (peerReady)
+                esp_now_send(peerMac,
+                             (uint8_t*)data_send.c_str(),
+                             data_send.length());
+
             delay(100);
-      }
-      if(Serial.available() > 0){ //for debugging by keyboard
-          String msgWire = Serial.readStringUntil('\r');
-          String data_send = "MB2L:" + msgWire + "\r\n";
-          esp_err_t result = esp_now_send( broadcastAddress_server, (uint8_t*)data_send.c_str(), data_send.length());
-          delay(100);
-      }
-      
-  } 
-  delay(10);
-}
+        }
 
-//Task2
-void Task2code( void * pvParameters ){
-  Serial.print("Task2 running on core ");
-  Serial.println(xPortGetCoreID());
+        if (Serial.available() > 0)
+        {
+            String msgWire = Serial.readStringUntil('\r');
 
-  for(;;){
-     
+            String data_send = "MB2L:" + msgWire + "\r\n";
+
+            if (peerReady)
+                esp_now_send(peerMac,
+                             (uint8_t*)data_send.c_str(),
+                             data_send.length());
+
+            delay(100);
+        }
+
+        server.handleClient();
     }
-
-  delay(10);
 }
- 
-void loop(){
-   delay(100);    //Do nothing
+
+// =====================================================
+// TASK2 - ว่างไว้สำหรับขยายในอนาคต
+// =====================================================
+
+void Task2code(void * pvParameters)
+{
+    Serial.print("Task2 running on core ");
+    Serial.println(xPortGetCoreID());
+
+    for (;;)
+    {
+        delay(10);
+    }
+}
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop()
+{
+    delay(100);
 }
