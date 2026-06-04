@@ -22,7 +22,7 @@ const int LED_power = 19;
 // AP CONFIG
 // =====================================================
 
-const char* AP_SSID     = "ESP32_CONFIG";
+const char* AP_SSID     = "ESP32_CONFIG_B";
 const char* AP_PASSWORD = "12345678";
 
 // =====================================================
