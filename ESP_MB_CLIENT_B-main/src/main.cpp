@@ -42,9 +42,11 @@ const unsigned long debounceDelay = 50;
 
 esp_now_peer_info_t peerInfo;
 
-TaskHandle_t Task1;
+TaskHandle_t ButtonTaskHandle;
+TaskHandle_t CommTaskHandle;
 
-void Task1code(void * pvParameters);
+void ButtonTask(void *pvParameters);
+void CommTask(void *pvParameters);
 
 // =====================================================
 // ตรวจสอบ MAC Format (XX:XX:XX:XX:XX:XX)
@@ -323,89 +325,118 @@ void setup()
     loadPeer();
 
     // สตาร์ทงาน FreeRTOS แยกคอร์ประมวลผล
+    // Task ปุ่มกด (Priority สูง)
     xTaskCreatePinnedToCore(
-        Task1code, "Task1",
-        10000, NULL, 1, &Task1, 0); 
-    delay(500);
+        ButtonTask,
+        "ButtonTask",
+        3000,
+        NULL,
+        3,
+        &ButtonTaskHandle,
+        1);
+
+    // Task สื่อสาร
+    xTaskCreatePinnedToCore(
+        CommTask,
+        "CommTask",
+        10000,
+        NULL,
+        1,
+        &CommTaskHandle,
+        1);
 }
 
 // =====================================================
-// TASK1 - Serial Relay -> ESP-NOW (และดักจับปุ่มกดเรียลไทม์)
+// Task ปุ่มกด
 // =====================================================
-void Task1code(void * pvParameters)
-{ 
-    Serial.print("Task1 running on core ");
+void ButtonTask(void *pvParameters)
+{
+    Serial.print("ButtonTask Core = ");
     Serial.println(xPortGetCoreID());
-    Serial.println("Task1 start");
+
     for (;;)
     {
-    int reading = digitalRead(BUTTON_PIN);
+        int reading = digitalRead(BUTTON_PIN);
 
-    if (reading != lastButtonState)
-    {
-        lastDebounceTime = millis();
-    }
-
-    if ((millis() - lastDebounceTime) > debounceDelay)
-    {
-        if (reading != buttonState)
+        if (reading != lastButtonState)
         {
-            buttonState = reading;
+            lastDebounceTime = millis();
+        }
 
-            if (buttonState == HIGH)
+        if ((millis() - lastDebounceTime) > debounceDelay)
+        {
+            if (reading != buttonState)
             {
-                Serial.println("ENTER CONFIG MODE");
-                startConfigMode();
+                buttonState = reading;
+
+                if (buttonState == HIGH)
+                {
+                    Serial.println("ENTER CONFIG MODE");
+                    startConfigMode();
+                }
             }
         }
+
+        lastButtonState = reading;
+
+        vTaskDelay(5 / portTICK_PERIOD_MS);
     }
+}
 
-    lastButtonState = reading;
+// =====================================================
+// Task Communication
+// =====================================================
 
-        // รับข้อมูล RS232
-if (Serial1.available() > 0)
+void CommTask(void *pvParameters)
 {
-    digitalWrite(LED_RS, HIGH);
+    Serial.print("CommTask Core = ");
+    Serial.println(xPortGetCoreID());
 
-    String msgWire = Serial1.readStringUntil('\n');
-    msgWire.trim();
-
-    digitalWrite(LED_RS, LOW);
-
-    if (msgWire.length() > 0 && peerReady)
+    for (;;)
     {
-        String data_send = "MB2L:" + msgWire + "\r\n";
+        // ================= RS232 =================
+        if (Serial1.available() > 0)
+        {
+            digitalWrite(LED_RS, HIGH);
 
-        esp_err_t result = esp_now_send(
-            peerMac,
-            (uint8_t*)data_send.c_str(),
-            data_send.length()
-        );
+            String msgWire = Serial1.readStringUntil('\n');
+            msgWire.trim();
 
-        Serial.print("[RS232] ");
-        Serial.println(data_send);
-        Serial.println(esp_err_to_name(result));
-    }
-}
+            digitalWrite(LED_RS, LOW);
 
-// ================= debug keyboard =================
-if (Serial.available() > 0)
-{
-    String msgWire = Serial.readStringUntil('\n');
-    msgWire.trim();
+            if (msgWire.length() > 0 && peerReady)
+            {
+                String data_send = "MB2L:" + msgWire + "\r\n";
 
-    String data_send = "MB2L:" + msgWire + "\n";
+                esp_err_t result = esp_now_send(
+                    peerMac,
+                    (uint8_t*)data_send.c_str(),
+                    data_send.length());
 
-    esp_err_t result = esp_now_send(
-        peerMac,
-        (uint8_t*)data_send.c_str(),
-        data_send.length()
-    );
+                Serial.print("[RS232] ");
+                Serial.println(data_send);
+                Serial.println(esp_err_to_name(result));
+            }
+        }
 
-    Serial.print("DEBUG SEND RESULT: ");
-    Serial.println(esp_err_to_name(result));
-}
-    vTaskDelay(1 / portTICK_PERIOD_MS);
+        // ================= DEBUG =================
+        if (Serial.available() > 0)
+        {
+            String msgWire = Serial.readStringUntil('\n');
+            msgWire.trim();
+
+            String data_send = "MB2L:" + msgWire + "\n";
+
+            esp_err_t result = esp_now_send(
+                peerMac,
+                (uint8_t*)data_send.c_str(),
+                data_send.length());
+
+            Serial.print("DEBUG SEND RESULT: ");
+            Serial.println(esp_err_to_name(result));
+        }
+
+        vTaskDelay(1 / portTICK_PERIOD_MS);
     }
 }
 
