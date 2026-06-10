@@ -42,11 +42,11 @@ const unsigned long debounceDelay = 50;
 
 esp_now_peer_info_t peerInfo;
 
-TaskHandle_t ButtonTaskHandle;
-TaskHandle_t CommTaskHandle;
+TaskHandle_t Task1;
+TaskHandle_t Task2;
 
-void ButtonTask(void *pvParameters);
-void CommTask(void *pvParameters);
+void Task1code(void * pvParameters);
+void Task2code(void * pvParameters);
 
 // =====================================================
 // ตรวจสอบ MAC Format (XX:XX:XX:XX:XX:XX)
@@ -327,31 +327,31 @@ void setup()
     // สตาร์ทงาน FreeRTOS แยกคอร์ประมวลผล
     // Task ปุ่มกด (Priority สูง)
     xTaskCreatePinnedToCore(
-        ButtonTask,
-        "ButtonTask",
+        Task1code,
+        "Task1",
         3000,
         NULL,
         3,
-        &ButtonTaskHandle,
+        &Task1,
         1);
 
     // Task สื่อสาร
     xTaskCreatePinnedToCore(
-        CommTask,
-        "CommTask",
+        Task2code,
+        "Task2",
         10000,
         NULL,
         1,
-        &CommTaskHandle,
+        &Task2,
         1);
 }
 
 // =====================================================
 // Task ปุ่มกด
 // =====================================================
-void ButtonTask(void *pvParameters)
+void Task1code(void *pvParameters)
 {
-    Serial.print("ButtonTask Core = ");
+    Serial.print("Task1 running on Core = ");
     Serial.println(xPortGetCoreID());
 
     for (;;)
@@ -387,9 +387,9 @@ void ButtonTask(void *pvParameters)
 // Task Communication
 // =====================================================
 
-void CommTask(void *pvParameters)
+void Task2code(void *pvParameters)
 {
-    Serial.print("CommTask Core = ");
+    Serial.print("Task2 running on core = ");
     Serial.println(xPortGetCoreID());
 
     for (;;)
