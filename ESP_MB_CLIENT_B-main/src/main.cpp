@@ -277,55 +277,74 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len)
 // =====================================================
 void setup()
 {
-    pinMode(2,         OUTPUT);
-    pinMode(4,         OUTPUT);
+    // กำหนดทิศทางการทำงานของ GPIO
+    // LED_power : แสดงสถานะไฟเลี้ยงระบบ
+    // LED_wifi  : แสดงสถานะการส่งข้อมูล ESP-NOW
+    // LED_RS    : แสดงสถานะการรับส่งข้อมูล RS232
+    // BUTTON_PIN: ปุ่มกดสำหรับเข้าสู่โหมดตั้งค่า
     pinMode(LED_power, OUTPUT);
     pinMode(LED_wifi,  OUTPUT);
     pinMode(LED_RS,    OUTPUT);
     pinMode(BUTTON_PIN, INPUT); 
 
-    // เกณฑ์ข้อที่ 1: ไฟแสดงสถานะสีแดงต้องติดค้างทันที
+    // กำหนดสถานะเริ่มต้นของ LED
     digitalWrite(LED_power, HIGH);
     digitalWrite(LED_wifi,  LOW);
     digitalWrite(LED_RS,    LOW);
 
+    // เริ่มต้น Serial สำหรับ Debug และ RS232 Communication
     Serial.begin(9600);
     Serial1.begin(9600, SERIAL_8N1, RXD1, TXD1);
 
+    // เปิดใช้งาน SPIFFS ใช้เก็บไฟล์หน้าเว็บสำหรับตั้งค่าระบบผ่าน Web Browser
     if (!SPIFFS.begin(true))
         Serial.println("SPIFFS ERROR");
 
-    // ตรวจสอบข้อมูลจาก Flash Memory
+    // อ่าน MAC Address ของ Master ที่บันทึกไว้ใน NVS Flash เพื่อใช้ตรวจสอบว่ามีการตั้งค่าระบบแล้วหรือไม่
     prefs.begin("config", true);
     String macStr = prefs.getString("peer", "");
     prefs.end();
 
+    // เลือกโหมดการทำงานของอุปกรณ์
+    // กรณียังไม่มี MAC Address:
+    //  - เข้าโหมด Config Mode
+    //  - เปิด WiFi AP และ Web Server
+    //  - รอผู้ใช้กำหนดค่า Master MAC
+    //
+    // กรณีมี MAC Address แล้ว:
+    //  - เข้าโหมด Normal Mode
+    //  - เริ่มระบบ ESP-NOW สำหรับรับส่งข้อมูล
     if (macStr == "")
     {
         Serial.println("NO MASTER MAC");
         startConfigMode();
     }
+    else
+    {
+        Serial.println("NORMAL GATEWAY MODE ACTIVE");
 
-    // หากผ่านเงื่อนไขด้านบนมาได้ บอร์ดจะรันในโหมดส่งข้อมูลปกติ
+    // ตั้งค่า ESP32 ให้ทำงานในโหมด Station เพื่อใช้งาน ESP-NOW
     WiFi.mode(WIFI_STA);
     WiFi.disconnect(); 
     Serial.println("NORMAL GATEWAY MODE ACTIVE");
     Serial.print("MY MAC: ");
     Serial.println(WiFi.macAddress());
 
+    // เริ่มต้นระบบ ESP-NOW หากเริ่มต้นไม่สำเร็จจะหยุดการทำงาน
     if (esp_now_init() != ESP_OK)
     {
         Serial.println("ESP NOW ERROR");
         return;
     }
 
+    // ลงทะเบียน Callback Function สำหรับตรวจสอบผลการส่งและรับข้อมูล
     esp_now_register_send_cb(OnDataSent);
     esp_now_register_recv_cb(OnDataRecv);
 
+    // โหลด MAC Address ของ Peer จาก Flash Memory และเพิ่มเข้า Peer List ของ ESP-NOW
     loadPeer();
 
-    // สตาร์ทงาน FreeRTOS แยกคอร์ประมวลผล
-    // Task ปุ่มกด (Priority สูง)
+    // สร้าง Task1 ทำหน้าที่ตรวจสอบปุ่มกดเพื่อเข้าสู่ Config Mode
     xTaskCreatePinnedToCore(
         Task1code,
         "Task1",
@@ -335,15 +354,19 @@ void setup()
         &Task1,
         1);
 
-    // Task สื่อสาร
+    // =================================================
+    // สร้าง Task2
+    // ทำหน้าที่รับข้อมูลจาก RS232 และส่งต่อผ่าน ESP-NOW
+    // =================================================
     xTaskCreatePinnedToCore(
         Task2code,
         "Task2",
-        10000,
+        8192,
         NULL,
         1,
         &Task2,
         1);
+    }
 }
 
 // =====================================================
